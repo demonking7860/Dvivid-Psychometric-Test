@@ -644,8 +644,15 @@ const surveyQuestions: Question[] = [
 const calculateScores = (responses: Response[]) => {
   const sectionScores: { [key: string]: { correct: number; total: number } } = {};
   
-  // Initialize section scores
-  const sections = ['Academic Readiness', 'Cultural Adaptability', 'Career Clarity', 'Study Abroad Readiness', 'Support System'];
+  // Initialize section scores - MUST match the section names from questions
+  const sections = [
+    'Academic Readiness',
+    'Career & Goal Alignment', 
+    'Financial Planning',
+    'Personal & Cultural Readiness',
+    'Practical Readiness',
+    'Support System'
+  ];
   sections.forEach(section => {
     sectionScores[section] = { correct: 0, total: 0 };
   });

@@ -55,56 +55,43 @@ export async function POST(request: NextRequest) {
     const htmlContent = generateHTMLContent(results)
     console.log('📄 Generated HTML content length:', htmlContent.length)
     
+    // Set viewport size to A4 dimensions
+    await page.setViewport({
+      width: 794, // A4 width in pixels at 96 DPI
+      height: 1123, // A4 height in pixels at 96 DPI
+    });
+
+    // Enable print and background colors
+    await page.emulateMediaType('print');
+
+    // Set content with better wait conditions
     await page.setContent(htmlContent, { 
-      waitUntil: 'domcontentloaded',
+      waitUntil: ['domcontentloaded', 'networkidle0'],
       timeout: 30000 
-    })
-    console.log('📄 Page content loaded successfully')
+    });
+
+    // Additional time for CSS animations and renders
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log('📄 Page content loaded successfully');
     
     // Wait for any dynamic content to load
     await new Promise(resolve => setTimeout(resolve, 3000))
     
-    // Generate PDF with error handling
-    let pdfBuffer: Buffer | Uint8Array;
-    try {
-      pdfBuffer = await page.pdf({
-        format: 'A4',
-        printBackground: true,
-        margin: {
-          top: '20mm',
-          right: '15mm',
-          bottom: '20mm',
-          left: '15mm'
-        },
-        timeout: 30000 // 30 second timeout for PDF generation
-      })
-    } catch (pdfError) {
-      console.error('❌ PDF generation failed:', pdfError);
-      await browser.close();
-      
-      // Return a simple text response as fallback
-      return new NextResponse(`
-        <html>
-          <head><title>Study Abroad Report - ${results['Student Name'] || results.studentName}</title></head>
-          <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h1>Study Abroad Readiness Report</h1>
-            <h2>Student: ${results['Student Name'] || results.studentName}</h2>
-            <p><strong>Overall Readiness Index:</strong> ${results['Overall Readiness Index'] || 'N/A'}</p>
-            <p><strong>Readiness Level:</strong> ${results['Readiness Level'] || 'Needs Assessment'}</p>
-            <h3>Strengths:</h3>
-            <p>${results.Strengths || 'No strengths identified'}</p>
-            <h3>Recommendations:</h3>
-            <p>${results.Recommendations || 'No recommendations provided'}</p>
-            <p><em>Note: This is a simplified report. For detailed analysis, please retry PDF generation.</em></p>
-          </body>
-        </html>
-      `, {
-        headers: {
-          'Content-Type': 'text/html',
-          'Content-Disposition': `attachment; filename="study-abroad-report-${(results['Student Name'] || results.studentName).replace(/\s+/g, '-').toLowerCase()}.html"`
-        }
-      });
-    }
+    // Generate PDF - no fallback, errors will be returned to user
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: true,
+      margin: {
+        top: '20mm',
+        right: '15mm',
+        bottom: '20mm',
+        left: '15mm'
+      },
+      timeout: 30000, // 30 second timeout for PDF generation
+      scale: 1.0, // Ensure 100% scale
+      landscape: false
+    });
     
     console.log('📄 PDF generated, buffer size:', pdfBuffer.length)
     
@@ -141,32 +128,102 @@ function generateHTMLContent(results: any): string {
     day: 'numeric'
   });
 
-  // Get data from new LLM format
-  const studentName = results['Student Name'] || results.studentName || 'Student';
-  const studentEmail = results['Student Email'] || results.studentEmail || results.userEmail || 'student@example.com';
-  const studentPhone = results['Student Phone'] || results.studentPhone || results.userPhone || '+91 XXXXX XXXXX';
-  const scores = results.Scores || {};
-  const overallIndex = results['Overall Readiness Index'] || 0;
-  const readinessLevel = results['Readiness Level'] || 'Needs Assessment';
-  const strengths = results.Strengths || 'No strengths identified';
-  const gaps = results.Gaps || 'No gaps identified';
-  const recommendations = results.Recommendations || 'No recommendations provided';
+  // Get data from LLM format - no fallbacks, use actual data only
+  const studentName = results['Student Name'] || results.studentName;
+  const studentEmail = results['Student Email'] || results.studentEmail || results.userEmail || '';
+  const studentPhone = results['Student Phone'] || results.studentPhone || results.userPhone || '';
+  
+  // Validate required fields
+  if (!studentName) {
+    throw new Error('Student Name is required');
+  }
+  
+  // Get scores object - validate it exists
+  const scoresRaw = results.scores || results.Scores || results['Scores'];
+  if (!scoresRaw) {
+    throw new Error('Scores data is required');
+  }
+  
+  // Extract individual scores
+  const scores = {
+    'Financial Planning': scoresRaw['Financial Planning'] ?? 0,
+    'Academic Readiness': scoresRaw['Academic Readiness'] ?? 0,
+    'Career Alignment': scoresRaw['Career Alignment'] ?? 0,
+    'Personal & Cultural': scoresRaw['Personal & Cultural'] ?? 0,
+    'Practical Readiness': scoresRaw['Practical Readiness'] ?? 0,
+    'Support System': scoresRaw['Support System'] ?? 0
+  };
+  
+  // Validate required scores exist
+  const overallIndex = results['Overall Readiness Index'] || results.overallIndex;
+  if (overallIndex === undefined) {
+    throw new Error('Overall Readiness Index is required');
+  }
+  
+  const readinessLevel = results['Readiness Level'] || results.readinessLevel;
+  if (!readinessLevel) {
+    throw new Error('Readiness Level is required');
+  }
+  
+  const strengths = results.Strengths;
+  if (!strengths) {
+    throw new Error('Strengths analysis is required');
+  }
+  
+  const gaps = results.Gaps;
+  if (!gaps) {
+    throw new Error('Gaps analysis is required');
+  }
+  
+  const recommendations = results.Recommendations;
+  if (!recommendations) {
+    throw new Error('Recommendations are required');
+  }
+  
   const countryFit = results['Country Fit (Top 3)'] || [];
 
   // Helper to format text into bullet points
-  const formatToBulletPoints = (text: string) => {
-    if (!text || text === 'No strengths identified' || text === 'No gaps identified' || text === 'No recommendations provided') {
+  const formatToBulletPoints = (text: string | string[] | undefined) => {
+    if (!text) {
       return `<li class="bullet-item">Information not available</li>`;
     }
-    
-    // Split by common delimiters and create bullet points
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const points = sentences.length > 1 ? sentences : text.split(/[,;]+/).filter(s => s.trim().length > 0);
-    
-    return points.map(point => {
-      const cleanPoint = point.trim().replace(/^\d+\.?\s*/, ''); // Remove leading numbers
-      return `<li class="bullet-item">${cleanPoint}</li>`;
-    }).join('');
+
+    // Handle array input
+    if (Array.isArray(text)) {
+      return text.map(item => `<li class="bullet-item">${item.trim()}</li>`).join('');
+    }
+
+    // Handle string input
+    if (typeof text === 'string') {
+      if (text === 'No strengths identified' || text === 'No gaps identified' || text === 'No recommendations provided') {
+        return `<li class="bullet-item">Information not available</li>`;
+      }
+
+      // Split by common delimiters and create bullet points
+      const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+      const points = sentences.length > 1 ? sentences : text.split(/[,;]+/).filter(s => s.trim().length > 0);
+
+      return points.map(point => {
+        const cleanPoint = point.trim().replace(/^\d+\.?\s*/, ''); // Remove leading numbers
+        return `<li class="bullet-item">${cleanPoint}</li>`;
+      }).join('');
+    }
+
+    // Handle any other type
+    return `<li class="bullet-item">Invalid input format</li>`;
+  };
+
+  // Helper to get weight for a framework
+  const getFrameworkWeight = (framework: string) => {
+    switch (framework) {
+      case 'Financial Planning': return '25%';
+      case 'Academic Readiness': return '20%';
+      case 'Career Alignment': return '20%';
+      case 'Personal & Cultural': return '15%';
+      case 'Practical Readiness': return '10%';
+      case 'Support System': return '10%';
+      default: return '0%';
+    }
   };
 
   // Helper to generate compact score card
@@ -227,24 +284,13 @@ function generateHTMLContent(results: any): string {
     `).join('');
   };
 
-  // Helper to generate country matrix
-  const generateCountryMatrix = (countries: string[]) => {
-    const countryDescriptions = {
-      'Singapore': 'Strong academic support, proximity to India, structured environment',
-      'Ireland': 'English-speaking, EU benefits, growing tech sector',
-      'Germany': 'Free education, strong engineering programs, EU access',
-      'Canada': 'Multicultural, post-graduation work permits, quality education',
-      'Australia': 'English-speaking, strong research programs, work opportunities',
-      'United Kingdom': 'Prestigious universities, strong Indian diaspora, global recognition',
-      'United States': 'Top universities, research opportunities, diverse programs',
-      'India': 'Domestic options, cost-effective, familiar environment',
-      'United Arab Emirates': 'Growing education sector, proximity, business opportunities',
-      'Netherlands': 'English programs, EU benefits, innovative education'
-    };
-    
-    return countries.map((country, index) => {
-      const description = (countryDescriptions as any)[country] || 'Good study destination with quality education';
-      const matchScore = Math.round(100 - (index * 15));
+  // Helper to generate country matrix - now supports both string and object formats
+  const generateCountryMatrix = (countries: any[]) => {
+    return countries.map((countryData, index) => {
+      // Handle both old format (string) and new format (object)
+      const country = typeof countryData === 'string' ? countryData : countryData.country;
+      const matchScore = typeof countryData === 'string' ? Math.round(100 - (index * 15)) : countryData.match || 100;
+      const description = typeof countryData === 'string' ? 'Well-suited destination for study abroad' : (countryData.reasoning || 'Good study destination');
       
       return `
         <div class="country-matrix-item">
@@ -257,9 +303,13 @@ function generateHTMLContent(results: any): string {
     }).join('');
   };
 
-  // Helper to generate compact country card with country map SVG
-  const generateCountryCard = (country: string, index: number) => {
-    const countryMaps = {
+  // Helper to generate compact country card with country map SVG - now supports both formats
+  const generateCountryCard = (countryData: any, index: number) => {
+    // Handle both old format (string) and new format (object)
+    const country = typeof countryData === 'string' ? countryData : countryData.country;
+    const matchScore = typeof countryData === 'string' ? Math.round(100 - (index * 15)) : countryData.match || 100;
+    
+    const countryMaps: { [key: string]: string } = {
       'Singapore': `<svg viewBox="0 0 100 60" class="country-map"><rect width="100" height="60" fill="#e74c3c" rx="8"/><text x="50" y="35" text-anchor="middle" fill="white" font-size="12" font-weight="bold">SG</text></svg>`,
       'Ireland': `<svg viewBox="0 0 100 60" class="country-map"><rect width="33" height="60" fill="#009639"/><rect x="33" width="34" height="60" fill="white"/><rect x="67" width="33" height="60" fill="#ff7900"/><text x="50" y="35" text-anchor="middle" fill="black" font-size="10" font-weight="bold">IE</text></svg>`,
       'Netherlands': `<svg viewBox="0 0 100 60" class="country-map"><rect width="100" height="20" fill="#c8102e"/><rect y="20" width="100" height="20" fill="white"/><rect y="40" width="100" height="20" fill="#003da5"/><text x="50" y="35" text-anchor="middle" fill="black" font-size="10" font-weight="bold">NL</text></svg>`,
@@ -272,14 +322,14 @@ function generateHTMLContent(results: any): string {
       'United Arab Emirates': `<svg viewBox="0 0 100 60" class="country-map"><rect width="25" height="60" fill="#ce1126"/><rect x="25" width="75" height="20" fill="#009639"/><rect x="25" y="20" width="75" height="20" fill="white"/><rect x="25" y="40" width="75" height="20" fill="#000000"/><text x="60" y="35" text-anchor="middle" fill="red" font-size="10" font-weight="bold">AE</text></svg>`
     };
     
-    const countryMap = (countryMaps as any)[country] || `<svg viewBox="0 0 100 60" class="country-map"><rect width="100" height="60" fill="#3498db" rx="8"/><text x="50" y="35" text-anchor="middle" fill="white" font-size="10" font-weight="bold">🌍</text></svg>`;
+    const countryMap = countryMaps[country] || `<svg viewBox="0 0 100 60" class="country-map"><rect width="100" height="60" fill="#3498db" rx="8"/><text x="50" y="35" text-anchor="middle" fill="white" font-size="10" font-weight="bold">🌍</text></svg>`;
     
     return `
       <div class="country-card">
         <div class="country-rank">#${index + 1}</div>
         <div class="country-flag">${countryMap}</div>
         <div class="country-name">${country}</div>
-        <div class="country-score">${Math.round(100 - (index * 15))}% Match</div>
+        <div class="country-score">${matchScore}% Match</div>
       </div>
     `;
   };
@@ -1251,12 +1301,12 @@ function generateHTMLContent(results: any): string {
                 </div>
                 
                 <div class="scores-grid">
-                    ${scores['Financial Planning'] ? generateScoreCard('Financial Planning', scores['Financial Planning'], '25%') : ''}
-                    ${scores['Academic Readiness'] ? generateScoreCard('Academic Readiness', scores['Academic Readiness'], '20%') : ''}
-                    ${scores['Career Alignment'] ? generateScoreCard('Career Alignment', scores['Career Alignment'], '20%') : ''}
-                    ${scores['Personal & Cultural'] ? generateScoreCard('Personal & Cultural', scores['Personal & Cultural'], '15%') : ''}
-                    ${scores['Practical Readiness'] ? generateScoreCard('Practical Readiness', scores['Practical Readiness'], '10%') : ''}
-                    ${scores['Support System'] ? generateScoreCard('Support System', scores['Support System'], '10%') : ''}
+                    ${generateScoreCard('Financial Planning', scores['Financial Planning'], getFrameworkWeight('Financial Planning'))}
+                    ${generateScoreCard('Academic Readiness', scores['Academic Readiness'], getFrameworkWeight('Academic Readiness'))}
+                    ${generateScoreCard('Career Alignment', scores['Career Alignment'], getFrameworkWeight('Career Alignment'))}
+                    ${generateScoreCard('Personal & Cultural', scores['Personal & Cultural'], getFrameworkWeight('Personal & Cultural'))}
+                    ${generateScoreCard('Practical Readiness', scores['Practical Readiness'], getFrameworkWeight('Practical Readiness'))}
+                    ${generateScoreCard('Support System', scores['Support System'], getFrameworkWeight('Support System'))}
                 </div>
 
             </div>
@@ -1350,7 +1400,7 @@ function generateHTMLContent(results: any): string {
                 <div class="country-fit">
                     <h4 style="grid-column: 1/-1; text-align: center; color: #003B8C; margin-bottom: 15px; font-size: 1.4em; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; position: relative; padding-bottom: 10px;">� Recommended Study Destinations</h4>
                     <div style="grid-column: 1/-1; width: 80px; height: 3px; background: linear-gradient(90deg, #003B8C, #5BE49B); margin: 0 auto 20px auto; border-radius: 2px;"></div>
-                    ${countryFit.map((country: string, index: number) => generateCountryCard(country, index)).join('')}
+                    ${countryFit.map((countryData: any, index: number) => generateCountryCard(countryData, index)).join('')}
                 </div>
             </div>
             
